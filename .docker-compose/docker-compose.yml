@@ -1,0 +1,255 @@
+version: '3.8'
+
+services:
+
+# kafka services
+
+  zookeeper:
+    container_name: helpdev_zookeeper
+    image: strimzi/kafka:0.19.0-kafka-2.5.0
+    command: [
+      "sh", "-c",
+      "bin/zookeeper-server-start.sh config/zookeeper.properties"
+    ]
+    ports:
+      - "2181:2181"
+    environment:
+      LOG_DIR: /tmp/logs
+
+  kafka:
+    container_name: helpdev_kafka
+    image: strimzi/kafka:0.19.0-kafka-2.5.0
+    command: [
+      "sh", "-c",
+      "bin/kafka-server-start.sh config/server.properties --override listeners=$${KAFKA_LISTENERS} --override advertised.listeners=$${KAFKA_ADVERTISED_LISTENERS} --override zookeeper.connect=$${KAFKA_ZOOKEEPER_CONNECT}"
+    ]
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      LOG_DIR: "/tmp/logs"
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+
+  kafka_manager:
+    container_name: helpdev_kafka_manager
+    image: hlebalbau/kafka-manager:stable
+    ports:
+      - "9000:9000"
+    environment:
+      ZK_HOSTS: "zookeeper:2181"
+    entrypoint: ["echo", "Service foo disabled"]
+
+# messaging with rabbitmq
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: rabbit
+      RABBITMQ_DEFAULT_PASS: rabbit
+      RABBITMQ_DEFAULT_VHOST: helpdev
+    ports:
+      - 5672:5672
+      - 15672:15672
+
+# mongodb
+
+  mongo:
+    image: mongo
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: helpdev
+      MONGO_INITDB_ROOT_PASSWORD: 123456
+    ports:
+      - "27017:27017"
+    volumes:
+      - ./docker-entrypoint-initdb.d/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+
+# mongodb - manager
+
+  mongo-express:
+    image: mongo-express
+    ports:
+      - 8099:8081
+    depends_on:
+      - mongo
+    environment:
+      ME_CONFIG_BASICAUTH_USERNAME: express
+      ME_CONFIG_BASICAUTH_PASSWORD: 123456
+      ME_CONFIG_MONGODB_PORT: 27017
+      ME_CONFIG_MONGODB_ADMINUSERNAME: helpdev
+      ME_CONFIG_MONGODB_ADMINPASSWORD: 123456
+    links:
+      - mongo
+
+# monitoring
+
+  prometheus:
+    image: prom/prometheus:v2.25.0
+    container_name: prometheus
+    volumes:
+      - ./prometheus:/etc/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+    network_mode: host
+    labels:
+      org.label-schema.group: "monitoring"
+    expose:
+      - 9090
+      
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    volumes:
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources
+    environment:
+      - GF_SECURITY_ADMIN_USER=${ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    restart: unless-stopped
+    network_mode: host
+    labels:
+      org.label-schema.group: "monitoring"
+    expose:
+      - 3000
+
+# service to publisher in kafka topic
+
+  kafka_publisher:
+    container_name: helpdev_kafka_publisher
+    image: helpdev/kafka-publisher
+    network_mode: host
+    environment:
+      KAFKA_SERVERS: "localhost:9092"
+      EVENT_TOPIC: "todos-eventos"
+      HTTP_PORT: 8090
+    depends_on:
+      - kafka
+    expose:
+      - 8090
+
+# sample kafka consumer
+
+  kafka_consumer:
+    container_name: helpdev_kafka_consumer
+    image: helpdev/kafka-consumer
+    network_mode: host
+    environment:
+      KAFKA_SERVERS: "localhost:9092"
+      EVENT_TOPIC: "todos-eventos"
+      KAFKA_EVENTS_GROUP_ID: consumer-1qaz
+    depends_on:
+      - kafka
+
+# sample with kafka streams -----
+
+  stream_event_a:
+    container_name: helpdev_stream_event_a
+    image: helpdev/streams-filter
+    network_mode: host
+    environment:
+      KAFKA_SERVERS: "localhost:9092"
+      EVENT_INPUT_TOPIC: todos-eventos
+      EVENT_OUTPUT_TOPIC: eventos_a
+      EVENT_FILTER: EVENT_A
+    depends_on:
+      - kafka
+
+  kafka_consumer_filtred:
+    container_name: helpdev_kafka_consumer_filtred_a
+    image: helpdev/kafka-consumer
+    network_mode: host
+    environment:
+      KAFKA_SERVERS: "localhost:9092"
+      EVENT_TOPIC: "eventos_a"
+      KAFKA_EVENTS_GROUP_ID: consumer-xpto
+    depends_on:
+      - kafka
+
+# clients with endpoit to receive webhook callback
+
+  rest_client_1:
+    container_name: helpdev_rest_client_1
+    image: helpdev/rest-client
+    expose:
+      - 8080
+    network_mode: host
+    environment:
+      HTTP_PORT: 8080
+    depends_on:
+      - kafka
+
+  rest_client_2:
+    container_name: helpdev_rest_client_2
+    image: helpdev/rest-client
+    expose:
+      - 8081
+    network_mode: host
+    environment:
+      HTTP_PORT: 8081
+    depends_on:
+      - kafka
+
+  rest_client_3:
+    container_name: helpdev_rest_client_3
+    image: helpdev/rest-client
+    expose:
+      - 8082
+    network_mode: host
+    environment:
+      HTTP_PORT: 8082
+    depends_on:
+      - kafka
+
+# service to filter events and prepare to dispatcher
+
+  webhook_filter:
+    container_name: helpdev_webhook_filter
+    image: helpdev/webhook-filter
+    restart: on-failure
+    network_mode: host
+    environment:
+      KAFKA_SERVERS: "localhost:9092"
+      EVENT_TOPIC: "todos-eventos"
+      KAFKA_EVENTS_GROUP_ID: webhook-filter
+      MONGODB_SERVERS: "mongodb://helpdev:123456@localhost:27017"
+      RABBITMQ_HOST: localhost
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USERNAME: rabbit
+      RABBITMQ_PASSWORD: rabbit
+      RABBITMQ_VHOST: helpdev
+      HTTP_PORT: 8190
+    depends_on:
+      - kafka
+      - rabbitmq
+    expose:
+      - 8190
+
+# service to filter events and prepare to dispatcher
+
+  webhook_dispatcher:
+    container_name: helpdev_webhook_dispatcher
+    image: helpdev/webhook-dispatcher
+    restart: on-failure
+    network_mode: host
+    environment:
+      RABBITMQ_HOST: localhost
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USERNAME: rabbit
+      RABBITMQ_PASSWORD: rabbit
+      RABBITMQ_VHOST: helpdev
+      HTTP_PORT: 8180
+    depends_on:
+      - rabbitmq
+    expose:
+      - 8180
+
